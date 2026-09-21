@@ -221,6 +221,43 @@ SH
   chmod +x "$1/git"
 }
 
+# git_toplevel_other_spelling <fakebin>: a git whose `rev-parse --show-toplevel`
+# answers with a DIFFERENT SPELLING of the very same directory, and which passes
+# every other call to the real git. This is the portable stand-in for Git for
+# Windows, where that command answers "C:/Users/..." while the shell's own
+# physical path for the same directory is "/c/Users/...": the clone-root guard
+# compares the two, so a guard that compares strings instead of paths reads one
+# directory as two and skips every real clone as "not a clone root". Where the
+# real path already has a single-letter root the drive-letter form is used, which
+# is the genuine Windows shape; everywhere else an equivalent path spelling is
+# emitted, which reproduces the same defect without needing a Windows host.
+git_toplevel_other_spelling() {
+  cat > "$1/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+want=0
+for a in "$@"; do [ "$a" = --show-toplevel ] && want=1; done
+if [ "$want" = 1 ]; then
+  out=$("$real" "$@") || exit $?
+  # Where the real path has a single-letter root, re-spell it in the genuine
+  # Windows drive-letter form. Then always emit an equivalent-but-different
+  # spelling, so this reproduces the mismatch on every platform rather than only
+  # where the drive-letter form applies - a same-spelling host would make the
+  # test vacuous.
+  case "$out" in
+    /?/*)
+      drive=$(printf '%s' "$out" | cut -c2 | tr '[:lower:]' '[:upper:]')
+      out="$drive:/$(printf '%s' "$out" | cut -c4-)"
+      ;;
+  esac
+  printf '%s/.\n' "$out"
+  exit 0
+fi
+exec "$real" "$@"
+SH
+  chmod +x "$1/git"
+}
+
 # run_sync_guarded <home> <fakebin> <outfile> <errfile> [args...]: run fleet-sync
 # with the fakebin on PATH and stdout/stderr captured separately. Per-test knobs
 # (FM_FLEET_SYNC_PACKED_REFS_LOCK_*, GIT_FETCH_COUNTER) are read from the caller's
@@ -673,6 +710,24 @@ test_symlinked_clone_still_syncs() {
   pass "the clone-root guard accepts a symlinked clone directory"
 }
 
+test_clone_root_guard_compares_paths_not_spellings() {
+  local home fakebin clone out err
+  home=$(new_home)
+  fakebin="$home/fb-spelling"; rm -rf "$fakebin"; mkdir -p "$fakebin"
+  clone=$(build_pair "$home" spelling)
+  advance_origin "$home" spelling C1
+  git_toplevel_other_spelling "$fakebin"
+  out="$home/out-spelling"; err="$home/err-spelling"
+
+  run_sync_guarded "$home" "$fakebin" "$out" "$err"
+
+  assert_contains "$(cat "$out")" "spelling: synced" \
+    "a clone whose toplevel is reported in another spelling of the same path must still sync"
+  assert_not_contains "$(cat "$out")" "not a clone root" \
+    "two spellings of one directory must never read as two directories"
+  pass "the clone-root guard compares resolved paths, not path spellings"
+}
+
 test_non_signature_fetch_failure_is_not_retried() {
   local home fakebin clone out err
   home=$(new_home)
@@ -719,3 +774,4 @@ test_non_signature_fetch_failure_is_not_retried
 test_non_clone_dir_never_syncs_the_enclosing_repo
 test_non_clone_dir_named_directly_never_syncs_the_enclosing_repo
 test_symlinked_clone_still_syncs
+test_clone_root_guard_compares_paths_not_spellings

@@ -318,8 +318,19 @@ sync_project() {
     return 0
   fi
   # Both sides are physical paths (git resolves --show-toplevel through symlinks),
-  # so a symlinked clone dir still compares equal to its own root.
+  # so a symlinked clone dir still compares equal to its own root. They must also
+  # be the same SPELLING of that path: Git for Windows answers with a native path
+  # ("C:/Users/..."), while the shell's own physical path uses the MSYS form
+  # ("/c/Users/..."), and comparing those two as strings reads one directory as
+  # two - skipping every clone on Windows as "not a clone root". Resolve git's
+  # answer through the same shell that produces the other side before comparing.
+  # On Unix that re-resolution is a no-op, and a path that cannot be entered
+  # keeps git's spelling so the report below still names what git would act on.
+  proj_top_shell=$(cd "$proj_top" 2>/dev/null && pwd -P) || proj_top_shell=""
   proj_abs=$(cd "$PROJ" && pwd -P) || proj_abs=""
+  if [ -n "$proj_top_shell" ]; then
+    proj_top=$proj_top_shell
+  fi
   if [ "$proj_top" != "$proj_abs" ]; then
     echo "$label: skipped: not a clone root (git would act on $proj_top)"
     return 0

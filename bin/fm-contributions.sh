@@ -57,6 +57,10 @@
 # cannot consume the pending signal. Source bodies are data, never commands.
 # All mutations serialize on this home's .contributions.lock. Writes refuse
 # symlinks and publish by rename. No forge writes are performed.
+# That lock is always awaited under a bound (FM_CONTRIBUTIONS_LOCK_TIMEOUT,
+# default 20 seconds) and refuses loudly instead of waiting forever, because
+# bootstrap calls arm as its last step: an unbounded wait on a lock that cannot
+# be reclaimed would stop every session start in this home from finishing.
 #
 # arm registers the existing authenticated custom-check path. Startup and PR
 # registration call it; when filing a linked upstream issue, call arm as well.
@@ -149,7 +153,15 @@ acquire() {
   FM_WAKE_QUEUE_LOCK="$STATE/.wake-queue.lock"
   # shellcheck source=bin/fm-wake-lib.sh
   . "$SCRIPT_DIR/fm-wake-lib.sh"
-  fm_lock_acquire_wait "$STATE/.contributions.lock" || fail 'observation lock unavailable'
+  # Bounded, never an unbounded wait: an observation lock that cannot be
+  # reclaimed (a leftover lock directory the owner protocol cannot resolve, for
+  # instance) would otherwise spin here forever, and bootstrap calls arm as its
+  # last step - so one unreclaimable lock file stops every session start in this
+  # home from ever finishing. Refusing after the bound turns that into the loud,
+  # recoverable failure below. FM_CONTRIBUTIONS_LOCK_TIMEOUT (default 20
+  # seconds) bounds the wait.
+  fm_lock_acquire_wait_bounded "$STATE/.contributions.lock" \
+    "${FM_CONTRIBUTIONS_LOCK_TIMEOUT:-20}" || fail 'observation lock unavailable'
   LOCK_HELD=1
 }
 
