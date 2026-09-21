@@ -790,8 +790,40 @@ test_late_owner_keeps_failure_episode_suppressed() {
   pass 'a late owner does not restart a shared forge failure episode'
 }
 
+# An observation lock that the owner protocol cannot reclaim must refuse, not
+# wait forever. Bootstrap calls `arm` as its LAST step, so an unbounded wait here
+# stops every session start in the home from finishing: the home goes quiet with
+# no digest, no wake drain and no supervision, and nothing in the output says
+# why. The shape below is the one observed in the wild - a plain lock directory
+# holding a nested owner directory and no pid file - which pins no live owner and
+# so can never be proved stale and taken over.
+test_unreclaimable_observation_lock_refuses_instead_of_hanging() {
+  local home lock start elapsed rc out
+  home=$(new_home contrib-lock-wedge)
+  forge_home "$home"
+  lock="$home/state/.contributions.lock"
+  mkdir -p "$lock/.contributions.lock.owner.wedged"
+
+  start=$(date +%s)
+  set +e
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_LOCK_TIMEOUT=2 \
+    timeout 60 "$ROOT/bin/fm-contributions.sh" arm 2>&1)
+  rc=$?
+  set -e
+  elapsed=$(( $(date +%s) - start ))
+
+  [ "$rc" -ne 124 ] || fail "arm hung on an unreclaimable observation lock (killed at 60s)"
+  [ "$rc" -ne 0 ] || fail "arm reported success while the observation lock was unreclaimable"
+  case "$out" in
+    *'observation lock unavailable'*) : ;;
+    *) fail "arm did not refuse loudly on an unreclaimable lock: $out" ;;
+  esac
+  [ "$elapsed" -lt 30 ] || fail "arm took ${elapsed}s to refuse a 2s-bounded lock wait"
+  pass 'an unreclaimable observation lock refuses loudly instead of hanging bootstrap'
+}
+
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_failure_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
+for test_name in test_unreclaimable_observation_lock_refuses_instead_of_hanging test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_failure_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"
