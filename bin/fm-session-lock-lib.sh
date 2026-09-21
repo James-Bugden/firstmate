@@ -214,16 +214,18 @@ _fm_win_top_msys_winpid() {
 #   PID PPID PGID WINPID TTY UID STIME COMMAND...
 # COMMAND is an absolute path that may contain spaces, and STIME is one token for
 # recent processes (HH:MM:SS) but two for older ones (MMM DD), so the column
-# offset of COMMAND is not fixed. Anchor on the first drive-letter or UNC path
-# token instead and rejoin to end of line. A native process whose COMMAND is a
-# bare name (System, Registry) has no such token and is never a harness, so it
-# is correctly reported as not found.
+# offset of COMMAND is not fixed. Anchor on the first drive-letter path, UNC
+# path, or MSYS-mangled POSIX path (`/c/...`, which `ps -W` reports for at
+# least some native processes instead of their Windows-style path) token
+# instead and rejoin to end of line. A native process whose COMMAND is a bare
+# name (System, Registry) has no such token and is never a harness, so it is
+# correctly reported as not found.
 _fm_win_proc_info() {  # <winpid>
   _fm_win_ps_w | awk -v w="$1" '
     $4 == w {
       start = 0
       for (i = 5; i <= NF; i++) {
-        if ($i ~ /^[A-Za-z]:[\\\/]/ || $i ~ /^\\\\/) { start = i; break }
+        if ($i ~ /^[A-Za-z]:[\\\/]/ || $i ~ /^\\\\/ || $i ~ /^\/[A-Za-z]\//) { start = i; break }
       }
       if (start == 0) next
       cmd = ""
