@@ -96,6 +96,18 @@ case "${1:-}" in
         'export TRACEPARENT='*)
           [ -z "${FM_FAKE_TRACE_EXPORTED:-}" ] || : > "$FM_FAKE_TRACE_EXPORTED"
           ;;
+        *FMWT*)
+          # Models the Windows-tmux pane_pwd_sentinel round trip
+          # (bin/fm-spawn.sh's spawn_pane_pwd_sentinel): the real pane would echo
+          # this command back with its marker resolved to the SUBSHELL's cwd,
+          # which on Windows psmux can differ from what pane_current_path
+          # reports. subshell-cwd models that live subshell cwd, falling back to
+          # the same value pane_current_path reports when a test does not
+          # deliberately diverge them.
+          nonce=$(printf '%s' "$payload" | sed -n "s/.*FMWT\\([A-Za-z0-9]*\\)\\[.*/\\1/p")
+          subshell_path=$(cat "$D/subshell-cwd" 2>/dev/null || cat "$D/cwd" 2>/dev/null)
+          printf 'FMWT%s[%s]FMWT%s\n' "$nonce" "$subshell_path" "$nonce" >> "$D/pane-buffer"
+          ;;
       esac
     fi
     exit 0 ;;
@@ -115,6 +127,7 @@ case "${1:-}" in
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
     [ -z "${FM_FAKE_COMPOSER_READ_FAIL:-}" ] || exit 1
+    [ -s "$D/pane-buffer" ] && cat "$D/pane-buffer"
     if [ -s "$D/composer" ]; then
       printf '╭────╮\n│ %s  │\n╰────╯\n' "$(cat "$D/composer")"
     else
@@ -258,6 +271,35 @@ run_spawn() {  # <case-dir> <args...>
   env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
     -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
     PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
+    FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    "$SPAWN" "$@" 2>&1
+}
+
+# make_windows_uname_stub <case-dir> -> echoes a fakebin dir holding only a
+# `uname` that reports Windows, so spawn_is_windows() (bin/fm-spawn.sh) takes
+# the Windows-tmux branch regardless of the host this suite runs on. Kept
+# separate from the shared fakebin so it never leaks into the other tests in
+# this file, which assert the non-Windows current-path proof.
+make_windows_uname_stub() {  # <case-dir>
+  local dir="$1/winbin"
+  mkdir -p "$dir"
+  cat > "$dir/uname" <<'SH'
+#!/usr/bin/env bash
+printf 'MINGW64_NT-10.0-19045\n'
+SH
+  chmod +x "$dir/uname"
+  printf '%s\n' "$dir"
+}
+
+run_spawn_windows() {  # <case-dir> <args...>
+  local dir=$1; shift
+  local winbin
+  winbin=$(make_windows_uname_stub "$dir")
+  mkdir -p "$dir/user-home"
+  env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
+    -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+    PATH="$winbin:$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     "$SPAWN" "$@" 2>&1
@@ -1697,8 +1739,52 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
   out=$(run_spawn "$dir" rl18 --relaunch --harness claude); rc=$?
   expect_code 1 "$rc" "a pane outside the worktree should refuse"
   assert_contains "$out" "not its recorded worktree" "the refusal should name the wrong location"
-  [ ! -s "$dir/fake/keys" ] || fail "a refused tmux relaunch must send nothing to the pane"
+  # On this platform's real host, the Windows-tmux sentinel probe (proven by
+  # test_spawn_relaunch_windows_tmux_uses_the_sentinel_probe_not_the_stale_pane_path
+  # above) legitimately sends read-only text to resolve the pane's subshell
+  # cwd; only the replacement launch itself must never be sent.
+  [ ! -s "$dir/fake/literal" ] || fail "a refused tmux relaunch must never launch a replacement"
   pass "fm-spawn --relaunch: refuses to start a replacement outside the copy holding its work"
+}
+
+# On Windows tmux (psmux), `#{pane_current_path}` follows only the pane's root
+# shell, not a `treehouse get` subshell, so it can report a stale directory
+# while the pane's real subshell cwd already sits in the recorded worktree.
+# The relaunch proof must use the same Windows-aware sentinel probe fresh
+# spawns already use (bin/fm-spawn.sh's spawn_worktree_probe_path), not the
+# raw pane_current_path read, or a healthy Windows relaunch refuses forever.
+test_spawn_relaunch_windows_tmux_uses_the_sentinel_probe_not_the_stale_pane_path() {
+  local dir out rc
+  dir=$(new_case winproof rl39)
+  add_ship_task "$dir" rl39 claude
+  printf 'zsh' > "$dir/fake/command"
+  # pane_current_path lags at the project root (the psmux root-shell quirk),
+  # while the pane's real subshell cwd is already the recorded worktree.
+  printf '%s' "$dir/proj" > "$dir/fake/cwd"
+  printf '%s' "$dir/wt" > "$dir/fake/subshell-cwd"
+  out=$(run_spawn_windows "$dir" rl39 --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "a Windows-tmux relaunch should trust the sentinel probe over the stale pane path"$'\n'"$out"
+  assert_not_contains "$out" "not its recorded worktree" "the sentinel-proven worktree should not have refused"
+  assert_contains "$out" "spawned rl39 harness=claude" "the launch should report success"
+  pass "fm-spawn --relaunch: a Windows-tmux relaunch proves the worktree with the sentinel probe, not the stale pane path"
+}
+
+test_spawn_relaunch_windows_tmux_still_refuses_a_genuine_mismatch() {
+  local dir out rc
+  dir=$(new_case winmismatch rl40)
+  add_ship_task "$dir" rl40 claude
+  printf 'zsh' > "$dir/fake/command"
+  printf '%s' "$dir/proj" > "$dir/fake/cwd"
+  # The sentinel probe itself proves the pane is elsewhere; the refusal must
+  # still fire rather than being satisfied by a Windows-only probe.
+  printf '%s' "$dir/proj" > "$dir/fake/subshell-cwd"
+  out=$(run_spawn_windows "$dir" rl40 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "a Windows-tmux relaunch should still refuse when the sentinel probe shows a real mismatch"
+  assert_contains "$out" "not its recorded worktree" "the refusal should name the wrong location"
+  # The read-only sentinel probe itself legitimately sends text to the pane to
+  # resolve its subshell cwd; only the replacement launch must never follow.
+  [ ! -s "$dir/fake/literal" ] || fail "a refused Windows-tmux relaunch must never launch a replacement"
+  pass "fm-spawn --relaunch: a Windows-tmux relaunch still refuses a pane the sentinel probe proves is elsewhere"
 }
 
 # --- 7. reclaiming a task whose endpoint is gone ----------------------------
@@ -2251,6 +2337,8 @@ test_spawn_relaunch_refuses_a_pending_authoritative_close
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
+test_spawn_relaunch_windows_tmux_uses_the_sentinel_probe_not_the_stale_pane_path
+test_spawn_relaunch_windows_tmux_still_refuses_a_genuine_mismatch
 test_tmux_refuses_a_window_missing_from_its_session
 test_tmux_refuses_a_session_that_cannot_be_found
 test_tmux_refuses_when_the_server_is_gone
