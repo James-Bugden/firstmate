@@ -90,9 +90,17 @@ assert_contains "$out" "armed: when-arm-test" "arm reports the canonical source 
 assert_present "$H/state/when/when-arm-test.spec" "arm writes the private spec"
 assert_present "$H/state/when/when-arm-test.trust" "arm writes the trust binding"
 assert_present "$H/state/procevent/when-arm-test.source" "arm registers the process-event source"
-mode=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
-  '. "$1/bin/fm-pr-lib.sh"; fm_pr_file_mode "$2"' _ "$ROOT" "$H/state/when/when-arm-test.spec")
-assert_contains "$mode" 600 "the spec is private"
+# The private-file guarantee is platform-dependent (bin/fm-pr-lib.sh's
+# fm_pr_mode_private_ok: an exact mode on unix, current-user ownership where
+# mode bits are unverifiable), so the test asserts through the same predicate
+# the real arm path validates the spec with, not a raw mode string.
+if PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
+  '. "$1/bin/fm-pr-lib.sh"; device=$(fm_pr_file_device "$2") && fm_pr_private_file_valid "$3" 600 "$device"' \
+  _ "$ROOT" "$H/state/when" "$H/state/when/when-arm-test.spec"; then
+  pass "the spec is private"
+else
+  fail "the spec is private"
+fi
 if when "$H" arm arm-test --condition true --action true 2>"$TMP_ROOT/dup.err"; then
   fail "re-arming an existing watch must be refused"
 fi

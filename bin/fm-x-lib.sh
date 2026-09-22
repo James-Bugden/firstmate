@@ -85,28 +85,68 @@ fmx_single_link_file_valid() {
   [ -z "$expected_device" ] || [ "$device" = "$expected_device" ]
 }
 
-fmx_single_link_file_mode_valid() {
-  local file=$1 expected_mode=$2 expected_device=${3-} mode
-  fmx_single_link_file_valid "$file" "$expected_device" || return 1
+# Selected mode-enforcement platform: "windows" or "unix". Reads the same
+# FM_PR_MODE_PLATFORM override as bin/fm-pr-lib.sh's _fm_pr_mode_platform (one
+# override then covers every private-file mode check a test forces), same
+# detection shape as bin/fm-session-lock-lib.sh's _fm_lock_platform.
+_fmx_mode_platform() {
+  if [ -n "${FM_PR_MODE_PLATFORM:-}" ]; then printf '%s\n' "$FM_PR_MODE_PLATFORM"; return 0; fi
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) printf 'windows\n' ;;
+    *) printf 'unix\n' ;;
+  esac
+}
+
+_fmx_file_owner() {
   if [ "$(uname)" = Darwin ]; then
-    mode=$(/usr/bin/stat -f %Lp "$file" 2>/dev/null) || return 1
+    /usr/bin/stat -f %u "$1" 2>/dev/null
   else
-    mode=$(stat -c %a "$file" 2>/dev/null) || return 1
+    stat -c %u "$1" 2>/dev/null
   fi
-  [ "$mode" = "$expected_mode" ]
+}
+
+# Native Windows Git Bash / MSYS derives the mode `stat` reports from NTFS ACLs
+# rather than storing a POSIX mode, so a `chmod`'ed file does not reliably read
+# back the mode it was just given: a numeric-mode comparison is unverifiable
+# there (bin/fm-pr-lib.sh's fm_pr_mode_private_ok has the full account). The
+# current-user uid a file is owned by IS reported accurately on that host, so
+# it stands in for the mode check there; every other platform keeps the exact
+# numeric mode check unchanged.
+fmx_single_link_file_mode_valid() {
+  local file=$1 expected_mode=$2 expected_device=${3-} mode owner
+  fmx_single_link_file_valid "$file" "$expected_device" || return 1
+  if [ "$(_fmx_mode_platform)" = windows ]; then
+    owner=$(_fmx_file_owner "$file") || return 1
+    [ -n "$owner" ] && [ "$owner" = "$(id -u 2>/dev/null)" ]
+  else
+    if [ "$(uname)" = Darwin ]; then
+      mode=$(/usr/bin/stat -f %Lp "$file" 2>/dev/null) || return 1
+    else
+      mode=$(stat -c %a "$file" 2>/dev/null) || return 1
+    fi
+    [ "$mode" = "$expected_mode" ]
+  fi
 }
 
 fmx_private_artifact_dir_device() {
-  local dir=$1 mode device
+  local dir=$1 mode device owner
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
   if [ "$(uname)" = Darwin ]; then
-    mode=$(/usr/bin/stat -f %Lp "$dir" 2>/dev/null) || return 1
     device=$(/usr/bin/stat -f %d "$dir" 2>/dev/null) || return 1
   else
-    mode=$(stat -c %a "$dir" 2>/dev/null) || return 1
     device=$(stat -c %d "$dir" 2>/dev/null) || return 1
   fi
-  [ "$mode" = 700 ] || return 1
+  if [ "$(_fmx_mode_platform)" = windows ]; then
+    owner=$(_fmx_file_owner "$dir") || return 1
+    [ -n "$owner" ] && [ "$owner" = "$(id -u 2>/dev/null)" ] || return 1
+  else
+    if [ "$(uname)" = Darwin ]; then
+      mode=$(/usr/bin/stat -f %Lp "$dir" 2>/dev/null) || return 1
+    else
+      mode=$(stat -c %a "$dir" 2>/dev/null) || return 1
+    fi
+    [ "$mode" = 700 ] || return 1
+  fi
   printf '%s\n' "$device"
 }
 
