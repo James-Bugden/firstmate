@@ -444,7 +444,7 @@ fm_procevent_extension_registration_load_locked() {  # <state> <source-id>
   [ -f "$file" ] && [ ! -L "$file" ] || return 2
   owner_line=$(sed -n '2p' "$file") || return 2
   [ "$owner_line" = owner=extension ] || return 1
-  [ "$(fm_pr_file_mode "$file")" = 600 ] \
+  fm_pr_mode_private_ok "$file" 600 \
     && [ "$(fm_pr_file_link_count "$file")" = 1 ] || return 2
   {
     IFS= read -r adapter_line \
@@ -950,12 +950,18 @@ fm_procevent_private_directory_valid() {
   local directory=$1 exact_mode=$2 canonical normalized mode
   [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
   fm_procevent_directory_owned_by_current_user "$directory" || return 1
-  mode=$(fm_pr_file_mode "$directory") || return 1
-  case "$mode" in ''|*[!0-7]*) return 1 ;; esac
-  if [ "$exact_mode" = 1 ]; then
-    [ "$mode" = 700 ] || return 1
-  elif [ $((8#$mode & 8#022)) -ne 0 ]; then
-    return 1
+  # The directory's numeric mode is unverifiable on native Windows Git Bash /
+  # MSYS (fm_pr_mode_private_ok's header comment); current-user ownership,
+  # just asserted above, is the honest substitute available there, so the bit
+  # checks below run only where the mode they read is real.
+  if [ "$(_fm_pr_mode_platform)" != windows ]; then
+    mode=$(fm_pr_file_mode "$directory") || return 1
+    case "$mode" in ''|*[!0-7]*) return 1 ;; esac
+    if [ "$exact_mode" = 1 ]; then
+      [ "$mode" = 700 ] || return 1
+    elif [ $((8#$mode & 8#022)) -ne 0 ]; then
+      return 1
+    fi
   fi
   canonical=$(cd -P -- "$directory" && pwd -P) || return 1
   normalized=$(fm_procevent_path_normalize "$directory") || return 1
@@ -1226,7 +1232,7 @@ fm_procevent_result_extension_load() {  # <result-path>
   local package_line binding_line extra
   [ -e "$file" ] || return 1
   [ -f "$file" ] && [ ! -L "$file" ] || return 2
-  [ "$(fm_pr_file_mode "$file")" = 600 ] \
+  fm_pr_mode_private_ok "$file" 600 \
     && [ "$(fm_pr_file_link_count "$file")" = 1 ] || return 2
   {
     IFS= read -r schema_line \

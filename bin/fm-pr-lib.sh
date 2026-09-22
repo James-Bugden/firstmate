@@ -225,6 +225,47 @@ fm_pr_file_mode() {
   fi
 }
 
+fm_pr_file_owner() {
+  if [ "$(uname)" = Darwin ]; then
+    /usr/bin/stat -f %u "$1" 2>/dev/null
+  else
+    stat -c %u "$1" 2>/dev/null
+  fi
+}
+
+# Selected mode-enforcement platform: "windows" or "unix". FM_PR_MODE_PLATFORM
+# overrides detection so the Windows path is exercisable from a Unix test host,
+# the same shape as _fm_lock_platform in bin/fm-session-lock-lib.sh.
+_fm_pr_mode_platform() {
+  if [ -n "${FM_PR_MODE_PLATFORM:-}" ]; then printf '%s\n' "$FM_PR_MODE_PLATFORM"; return 0; fi
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) printf 'windows\n' ;;
+    *) printf 'unix\n' ;;
+  esac
+}
+
+# Native Windows Git Bash / MSYS derives the mode `stat` reports from NTFS ACLs
+# rather than storing a POSIX mode, so a `chmod`'ed file does not reliably read
+# back the mode it was just given (traced on MINGW64_NT-10.0-26200: the same
+# `chmod 0600` yields 700 in one run and 644 in another). A numeric-mode
+# comparison is therefore unverifiable there: it would either refuse every
+# legitimately private file or silently accept an insecure one. The current-user
+# uid a file is owned by IS reported accurately on that host (unlike the mode),
+# so it stands in for the mode check there, matching
+# fm_procevent_directory_owned_by_current_user's already-established use of the
+# same signal for the same purpose. Every other assertion callers make alongside
+# this one - regular file, not a symlink, single hard link, expected device - is
+# unaffected and still enforced on every platform, Windows included.
+fm_pr_mode_private_ok() {  # <path> <expected-octal-mode>
+  local path=$1 mode=$2 owner
+  if [ "$(_fm_pr_mode_platform)" = windows ]; then
+    owner=$(fm_pr_file_owner "$path") || return 1
+    [ -n "$owner" ] && [ "$owner" = "$(id -u 2>/dev/null)" ]
+  else
+    [ "$(fm_pr_file_mode "$path")" = "$mode" ]
+  fi
+}
+
 fm_pr_file_device() {
   if [ "$(uname)" = Darwin ]; then
     /usr/bin/stat -f %d "$1" 2>/dev/null
@@ -280,7 +321,7 @@ fm_pr_sha256() {
 fm_pr_private_file_valid() {
   local path=$1 mode=$2 device=$3
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  [ "$(fm_pr_file_mode "$path")" = "$mode" ] || return 1
+  fm_pr_mode_private_ok "$path" "$mode" || return 1
   [ "$(fm_pr_file_device "$path")" = "$device" ] || return 1
   [ "$(fm_pr_file_link_count "$path")" = 1 ]
 }
