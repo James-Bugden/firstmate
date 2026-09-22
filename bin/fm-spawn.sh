@@ -3847,8 +3847,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # than wherever the pane happened to drift.
   relaunch_wt_real=$(real_path_or_raw "$WT")
   relaunch_seen=
+  relaunch_nonce="rl$$"
   for _ in $(seq 1 10); do
-    relaunch_seen=$(spawn_current_path "$WT_TARGET" || true)
+    relaunch_seen=$(spawn_worktree_probe_path "$WT_TARGET" "$relaunch_nonce" || true)
     [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ] || break
     sleep 0.5
   done
@@ -3863,7 +3864,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
       exit 1
     }
     for _ in $(seq 1 10); do
-      relaunch_seen=$(spawn_current_path "$WT_TARGET" || true)
+      relaunch_seen=$(spawn_worktree_probe_path "$WT_TARGET" "$relaunch_nonce" || true)
       [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ] || break
       sleep 0.5
     done
